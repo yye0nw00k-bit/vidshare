@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: vidshare
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /healthz
+    envVars:
+      - key: VIDSHARE_SECRET
+        generateValue: true
+      - key: VIDSHARE_HTTPS
+        value: "true"
+      - key: VIDSHARE_DATA_DIR
+        value: /var/data
+      - key: VIDSHARE_ADMIN_USERNAME
+        value: "최연욱"
+      - key: VIDSHARE_ADMIN_PASSWORD
+        sync: false
+    disk:
+      name: vidshare-data
+      mountPath: /var/data
+      sizeGB: 10

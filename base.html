@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title if title else 'vidshare' }}</title>
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;background:#0f0f0f;color:#f1f1f1}a{color:inherit;text-decoration:none}nav{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:14px;padding:12px 22px;background:#151515;border-bottom:1px solid #2b2b2b}.logo{font-size:25px;font-weight:900}.logo span{color:#ff315c}.search{flex:1;max-width:720px;display:flex;gap:8px}.search input,input,textarea{width:100%;background:#1d1d1d;color:#fff;border:1px solid #333;border-radius:8px;padding:11px 12px}button,.btn{border:0;border-radius:8px;padding:10px 14px;background:#fff;color:#111;font-weight:700;cursor:pointer}.btn-dark{background:#272727;color:#fff}.btn-red{background:#ff315c;color:#fff}.btn-green{background:#2d7d46;color:#fff}.btn-small{padding:7px 10px;font-size:13px}main{max-width:1280px;margin:0 auto;padding:24px}.flash{background:#272727;border:1px solid #444;padding:12px;border-radius:10px;margin-bottom:18px}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:20px}.card{background:#181818;border-radius:12px;overflow:hidden;border:1px solid #292929}.thumb{aspect-ratio:16/9;background:#222;display:flex;align-items:center;justify-content:center;overflow:hidden}.thumb img,.thumb video{width:100%;height:100%;object-fit:cover}.placeholder{font-size:34px;color:#777}.card-body{padding:12px}.title{font-weight:800;line-height:1.4;margin-bottom:8px}.muted{color:#aaa;font-size:14px}.row{display:flex;align-items:center;justify-content:space-between;gap:10px}.actions{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0}.watch-layout{display:grid;grid-template-columns:minmax(0,2.1fr) minmax(280px,.9fr);gap:24px}.player{width:100%;max-height:72vh;background:#000;border-radius:12px}.panel{background:#181818;border:1px solid #2b2b2b;padding:18px;border-radius:12px}.form{max-width:600px;margin:40px auto}.form h1{margin-top:0}.form-group{margin-bottom:14px}label{display:block;margin-bottom:7px;font-weight:700}textarea{min-height:140px;resize:vertical}.comment{padding:12px 0;border-bottom:1px solid #2b2b2b}.comment:last-child{border-bottom:0}.avatar{width:70px;height:70px;border-radius:50%;background:#292929;display:flex;align-items:center;justify-content:center;font-size:26px;font-weight:800;overflow:hidden}.avatar img{width:100%;height:100%;object-fit:cover}.stats{display:flex;gap:18px;flex-wrap:wrap}.stat{background:#222;padding:10px 14px;border-radius:10px}.admin-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:22px}.table-wrap{overflow:auto}.table{width:100%;border-collapse:collapse}.table th,.table td{border-bottom:1px solid #2b2b2b;padding:10px;text-align:left;vertical-align:top}.danger{color:#ff738d}.pill{display:inline-block;padding:4px 8px;border-radius:999px;background:#2b2b2b;font-size:12px}@media(max-width:900px){.watch-layout{grid-template-columns:1fr}.admin-grid{grid-template-columns:repeat(2,1fr)}nav{flex-wrap:wrap}.search{order:5;flex-basis:100%}}@media(max-width:600px){.admin-grid{grid-template-columns:1fr}.grid{grid-template-columns:1fr 1fr}main{padding:14px}}
+</style></head>
+<body>
+<nav>
+<a class="logo" href="{{ url_for('index') }}">vid<span>share</span></a>
+<form class="search" action="{{ url_for('search') }}" method="get"><input name="q" value="{{ request.args.get('q','') }}" placeholder="영상이나 크리에이터 검색"><button>검색</button></form>
+<a class="btn btn-dark" href="{{ url_for('index') }}">홈</a>
+{% if logged_in %}
+<a class="btn btn-dark" href="{{ url_for('subscriptions_feed') }}">구독 피드</a>
+<a class="btn btn-dark" href="{{ url_for('upload') }}">＋ 업로드</a>
+<a href="{{ url_for('channel', user_id=current_user['id']) }}">{{ current_user['username'] }}</a>
+{% if current_user['is_admin'] %}<a class="btn btn-green" href="{{ url_for('admin') }}">관리자</a>{% endif %}
+<a class="btn btn-dark" href="{{ url_for('edit_profile') }}">프로필</a>
+<form method="post" action="{{ url_for('logout') }}" style="display:inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn-dark">로그아웃</button></form>
+{% else %}<a class="btn btn-dark" href="{{ url_for('login') }}">로그인</a><a class="btn" href="{{ url_for('register') }}">회원가입</a>{% endif %}
+</nav>
+<main>{% with messages=get_flashed_messages() %}{% for message in messages %}<div class="flash">{{ message }}</div>{% endfor %}{% endwith %}{% block content %}{% endblock %}</main>
+</body></html>
