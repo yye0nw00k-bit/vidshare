@@ -1,0 +1,38 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>검색 결과</h1>
+<div class="muted" style="margin-bottom:22px">‘{{ q }}’ 검색 결과</div>
+
+{% if channels %}
+<h2>크리에이터</h2>
+<div class="grid" style="margin-bottom:28px">
+  {% for c in channels %}
+  <a class="card" href="{{ url_for('channel', user_id=c['id']) }}">
+    <div class="card-body" style="display:flex;align-items:center;gap:14px;min-height:112px">
+      <div class="avatar" style="flex-shrink:0">{{ c['username'][0] }}</div>
+      <div style="min-width:0">
+        <div class="title" style="margin-bottom:5px">{{ c['username'] }}{% if c['is_admin'] %} <span class="pill">관리자</span>{% endif %}</div>
+        <div class="muted">구독자 {{ c['subscriber_count'] }}명 · 영상 {{ c['video_count'] }}개</div>
+        {% if c['bio'] %}<div class="muted" style="margin-top:6px;overflow-wrap:anywhere">{{ c['bio'][:90] }}</div>{% endif %}
+      </div>
+    </div>
+  </a>
+  {% endfor %}
+</div>
+{% endif %}
+
+<h2>영상</h2>
+<div class="grid">
+  {% for v in videos %}
+  <a class="card" href="{{ url_for('watch',video_id=v['id']) }}">
+    <div class="thumb">{% if v['thumbnail_filename'] %}<img src="{{ url_for('static',filename='thumbnails/'+v['thumbnail_filename']) }}" alt="">{% else %}<video src="{{ url_for('video_media',filename=v['filename']) }}" muted preload="metadata"></video>{% endif %}</div>
+    <div class="card-body">
+      <div class="title">{{ v['title'] }}</div>
+      <div class="muted">{{ v['username'] }} · 조회수 {{ v['views'] }} · 좋아요 {{ v['like_count'] }}</div>
+    </div>
+  </a>
+  {% else %}
+    {% if not channels %}<div class="panel">검색 결과가 없습니다.</div>{% else %}<div class="muted">이 크리에이터가 올린 영상은 아직 없습니다.</div>{% endif %}
+  {% endfor %}
+</div>
+{% endblock %}
