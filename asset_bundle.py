@@ -15,6 +15,13 @@ def ensure_assets(base_dir):
     os.makedirs(root, exist_ok=True)
     raw = base64.b85decode(_BUNDLE.encode("ascii"))
     with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tf:
-        tf.extractall(root)
+        # Keep repository-supplied template files and fill in only missing bundle assets.
+        for member in tf.getmembers():
+            target = os.path.abspath(os.path.join(root, member.name))
+            if target != root and not target.startswith(root + os.sep):
+                raise ValueError("Invalid path in asset bundle")
+            if os.path.exists(target):
+                continue
+            tf.extract(member, root)
     os.makedirs(os.path.join(static_dir, "uploads"), exist_ok=True)
     os.makedirs(os.path.join(static_dir, "thumbnails"), exist_ok=True)
