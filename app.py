@@ -757,10 +757,20 @@ def search():
             WHERE v.title LIKE ? OR v.description LIKE ? OR u.username LIKE ?
             ORDER BY v.id DESC LIMIT 50
         ''', (f'%{q}%', f'%{q}%', f'%{q}%')).fetchall()
+        channels = conn.execute('''
+            SELECT u.id, u.username, u.bio, u.avatar_filename, u.created_at, u.is_admin,
+                   (SELECT COUNT(*) FROM subscriptions s WHERE s.channel_id = u.id) AS subscriber_count,
+                   (SELECT COUNT(*) FROM videos v WHERE v.user_id = u.id) AS video_count
+            FROM users u
+            WHERE u.username LIKE ?
+            ORDER BY CASE WHEN u.username = ? THEN 0 ELSE 1 END, u.username COLLATE NOCASE
+            LIMIT 30
+        ''', (f'%{q}%', q)).fetchall()
     else:
         videos = []
+        channels = []
     conn.close()
-    return render_template('search.html', q=q, videos=videos)
+    return render_template('search.html', q=q, videos=videos, channels=channels)
 
 
 @app.route('/admin')
