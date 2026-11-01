@@ -1,0 +1,48 @@
+name: Build VidShare Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'mobile/**'
+      - '.github/workflows/android-apk.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out VidShare
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+          cache-dependency-path: mobile/pubspec.yaml
+
+      - name: Generate Android project files
+        working-directory: mobile
+        run: flutter create --platforms=android --project-name=vidshare_mobile --org=com.vidshare --no-pub .
+
+      - name: Install Flutter packages
+        working-directory: mobile
+        run: flutter pub get
+
+      - name: Build release APK
+        working-directory: mobile
+        run: flutter build apk --release --dart-define=VIDSHARE_API_URL=https://vidshare-1-1-1.onrender.com
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: VidShare-Android-APK
+          path: mobile/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+          retention-days: 14
