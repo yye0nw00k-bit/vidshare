@@ -245,7 +245,11 @@ class _AuthPageState extends State<AuthPage> {
                         ),
                       ),
                       validator: (value) {
-                        if ((value ?? '').length < 8) {
+                        final password = value ?? '';
+                        if (password.isEmpty) {
+                          return '비밀번호를 입력해주세요.';
+                        }
+                        if (_register && password.length < 8) {
                           return '비밀번호는 8자 이상이어야 합니다.';
                         }
                         return null;
