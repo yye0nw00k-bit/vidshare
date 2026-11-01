@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, url_for, session, flash, abort, send_from_directory
+from flask import Flask, render_template, request, redirect, url_for, session, flash, abort, send_from_directory, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 import sqlite3
@@ -8,7 +8,7 @@ import hashlib
 import secrets
 import subprocess
 import shutil
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 try:
@@ -143,6 +143,18 @@ def init_db():
         FOREIGN KEY(video_id) REFERENCES videos(id) ON DELETE CASCADE,
         FOREIGN KEY(comment_id) REFERENCES comments(id) ON DELETE CASCADE
     );
+
+    CREATE TABLE IF NOT EXISTS api_tokens (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        token_hash TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        revoked_at TEXT DEFAULT '',
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id);
     ''')
 
     # Gunicorn can import app.py in multiple workers at the same time.
@@ -275,6 +287,105 @@ def viewer_key():
         return f'user:{uid}'
     raw = f"{request.remote_addr or 'unknown'}|{request.headers.get('User-Agent', '')}|{app.secret_key}"
     return 'anon:' + hashlib.sha256(raw.encode('utf-8')).hexdigest()
+
+
+def api_bearer_user():
+    """Resolve mobile bearer tokens without changing the PC site's session login."""
+    authorization = request.headers.get('Authorization', '')
+    if not authorization.lower().startswith('bearer '):
+        return None
+    token = authorization[7:].strip()
+    if len(token) < 40:
+        return None
+    token_hash = hashlib.sha256(token.encode('utf-8')).hexdigest()
+    conn = get_db()
+    user = conn.execute('''
+        SELECT u.*
+        FROM api_tokens t
+        JOIN users u ON u.id = t.user_id
+        WHERE t.token_hash = ? AND t.revoked_at = '' AND t.expires_at > ?
+        LIMIT 1
+    ''', (token_hash, now_iso())).fetchone()
+    conn.close()
+    return user
+
+
+def api_issue_token(user_id):
+    token = secrets.token_urlsafe(48)
+    token_hash = hashlib.sha256(token.encode('utf-8')).hexdigest()
+    created = now_iso()
+    expires = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+    conn = get_db()
+    conn.execute(
+        'INSERT INTO api_tokens(user_id, token_hash, created_at, expires_at) VALUES (?, ?, ?, ?)',
+        (user_id, token_hash, created, expires)
+    )
+    conn.commit()
+    conn.close()
+    return token, expires
+
+
+def api_user_payload(user):
+    return {
+        'id': user['id'],
+        'username': user['username'],
+        'bio': user['bio'] or '',
+        'is_admin': bool(user['is_admin']),
+        'created_at': user['created_at'],
+    }
+
+
+def api_video_payload(conn, video, viewer_id=None):
+    keys = video.keys()
+    video_id = video['id']
+    creator_id = video['user_id']
+    like_count = video['like_count'] if 'like_count' in keys else conn.execute(
+        'SELECT COUNT(*) FROM likes WHERE video_id = ?', (video_id,)
+    ).fetchone()[0]
+    comment_count = video['comment_count'] if 'comment_count' in keys else conn.execute(
+        'SELECT COUNT(*) FROM comments WHERE video_id = ?', (video_id,)
+    ).fetchone()[0]
+    subscriber_count = conn.execute(
+        'SELECT COUNT(*) FROM subscriptions WHERE channel_id = ?', (creator_id,)
+    ).fetchone()[0]
+    is_liked = False
+    is_subscribed = False
+    if viewer_id:
+        is_liked = bool(conn.execute(
+            'SELECT 1 FROM likes WHERE user_id = ? AND video_id = ?', (viewer_id, video_id)
+        ).fetchone())
+        if viewer_id != creator_id:
+            is_subscribed = bool(conn.execute(
+                'SELECT 1 FROM subscriptions WHERE subscriber_id = ? AND channel_id = ?',
+                (viewer_id, creator_id)
+            ).fetchone())
+    thumbnail_url = ''
+    if video['thumbnail_filename']:
+        thumbnail_url = url_for(
+            'thumbnail_media', filename=video['thumbnail_filename'], _external=True
+        )
+    return {
+        'id': video_id,
+        'title': video['title'],
+        'description': video['description'] or '',
+        'creator_id': creator_id,
+        'creator': video['username'],
+        'video_url': url_for('video_media', filename=video['filename'], _external=True),
+        'thumbnail_url': thumbnail_url,
+        'views': video['views'],
+        'likes': like_count,
+        'comments': comment_count,
+        'subscriber_count': subscriber_count,
+        'is_liked': is_liked,
+        'is_subscribed': is_subscribed,
+        'created_at': video['created_at'],
+    }
+
+
+def api_auth_error():
+    return jsonify({'error': '로그인이 필요합니다. 다시 로그인해주세요.'}), 401
+
+
 
 
 def require_login(message='로그인 후 이용할 수 있습니다.'):
@@ -832,6 +943,351 @@ def admin_delete_video(video_id):
     return redirect(url_for('admin'))
 
 
+# JSON API for the native Flutter app. These endpoints use the same users,
+# videos, likes, subscriptions, comments and upload folders as the PC website.
+@app.route('/api/mobile/auth/register', methods=['POST'])
+def api_mobile_register():
+    data = request.get_json(silent=True) or {}
+    username = str(data.get('username', '')).strip()
+    password = str(data.get('password', ''))
+    if len(username) < 2 or len(username) > 30:
+        return jsonify({'error': '닉네임은 2~30자여야 합니다.'}), 400
+    if len(password) < 8:
+        return jsonify({'error': '비밀번호는 8자 이상이어야 합니다.'}), 400
+    conn = get_db()
+    try:
+        cursor = conn.execute(
+            'INSERT INTO users(username, password_hash, created_at) VALUES (?, ?, ?)',
+            (username, generate_password_hash(password), now_iso())
+        )
+        user_id = cursor.lastrowid
+        conn.commit()
+        user = conn.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        conn.close()
+        return jsonify({'error': '이미 사용 중인 닉네임입니다.'}), 409
+    conn.close()
+    token, expires = api_issue_token(user_id)
+    return jsonify({'token': token, 'expires_at': expires, 'user': api_user_payload(user)}), 201
+
+
+@app.route('/api/mobile/auth/login', methods=['POST'])
+def api_mobile_login():
+    data = request.get_json(silent=True) or {}
+    username = str(data.get('username', '')).strip()
+    password = str(data.get('password', ''))
+    conn = get_db()
+    user = conn.execute('SELECT * FROM users WHERE username = ?', (username,)).fetchone()
+    conn.close()
+    if not user or not check_password_hash(user['password_hash'], password):
+        return jsonify({'error': '닉네임 또는 비밀번호가 올바르지 않습니다.'}), 401
+    token, expires = api_issue_token(user['id'])
+    return jsonify({'token': token, 'expires_at': expires, 'user': api_user_payload(user)})
+
+
+@app.route('/api/mobile/auth/me', methods=['GET'])
+def api_mobile_me():
+    user = api_bearer_user()
+    if not user:
+        return api_auth_error()
+    return jsonify({'user': api_user_payload(user)})
+
+
+@app.route('/api/mobile/auth/logout', methods=['POST'])
+def api_mobile_logout():
+    authorization = request.headers.get('Authorization', '')
+    if not authorization.lower().startswith('bearer '):
+        return api_auth_error()
+    token = authorization[7:].strip()
+    token_hash = hashlib.sha256(token.encode('utf-8')).hexdigest()
+    conn = get_db()
+    conn.execute(
+        "UPDATE api_tokens SET revoked_at = ? WHERE token_hash = ? AND revoked_at = ''",
+        (now_iso(), token_hash)
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/mobile/videos', methods=['GET'])
+def api_mobile_videos():
+    user = api_bearer_user()
+    viewer_id = user['id'] if user else None
+    feed = request.args.get('feed', 'home').strip().lower()
+    query = request.args.get('q', '').strip()[:100]
+    try:
+        limit = max(1, min(int(request.args.get('limit', '40')), 50))
+        offset = max(0, min(int(request.args.get('offset', '0')), 10000))
+    except ValueError:
+        return jsonify({'error': '잘못된 페이지 요청입니다.'}), 400
+
+    conn = get_db()
+    if feed in ('subscriptions', 'mine', 'liked') and not user:
+        conn.close()
+        return api_auth_error()
+
+    if feed == 'subscriptions':
+        sql = '''
+            SELECT v.*, u.username,
+                   (SELECT COUNT(*) FROM likes l WHERE l.video_id = v.id) AS like_count,
+                   (SELECT COUNT(*) FROM comments c WHERE c.video_id = v.id) AS comment_count
+            FROM videos v JOIN users u ON u.id = v.user_id
+            JOIN subscriptions s ON s.channel_id = v.user_id
+            WHERE s.subscriber_id = ?
+        '''
+        params = [viewer_id]
+        if query:
+            sql += ' AND (v.title LIKE ? OR v.description LIKE ? OR u.username LIKE ?)'
+            params.extend([f'%{query}%'] * 3)
+        sql += ' ORDER BY v.created_at DESC LIMIT ? OFFSET ?'
+        params.extend([limit, offset])
+        rows = conn.execute(sql, params).fetchall()
+    elif feed == 'mine':
+        sql = '''
+            SELECT v.*, u.username,
+                   (SELECT COUNT(*) FROM likes l WHERE l.video_id = v.id) AS like_count,
+                   (SELECT COUNT(*) FROM comments c WHERE c.video_id = v.id) AS comment_count
+            FROM videos v JOIN users u ON u.id = v.user_id
+            WHERE v.user_id = ?
+        '''
+        params = [viewer_id]
+        if query:
+            sql += ' AND (v.title LIKE ? OR v.description LIKE ?)'
+            params.extend([f'%{query}%'] * 2)
+        sql += ' ORDER BY v.id DESC LIMIT ? OFFSET ?'
+        params.extend([limit, offset])
+        rows = conn.execute(sql, params).fetchall()
+    elif feed == 'liked':
+        sql = '''
+            SELECT v.*, u.username,
+                   (SELECT COUNT(*) FROM likes l WHERE l.video_id = v.id) AS like_count,
+                   (SELECT COUNT(*) FROM comments c WHERE c.video_id = v.id) AS comment_count
+            FROM videos v JOIN users u ON u.id = v.user_id
+            JOIN likes mine ON mine.video_id = v.id
+            WHERE mine.user_id = ?
+        '''
+        params = [viewer_id]
+        if query:
+            sql += ' AND (v.title LIKE ? OR v.description LIKE ? OR u.username LIKE ?)'
+            params.extend([f'%{query}%'] * 3)
+        sql += ' ORDER BY mine.created_at DESC LIMIT ? OFFSET ?'
+        params.extend([limit, offset])
+        rows = conn.execute(sql, params).fetchall()
+    elif feed == 'home':
+        if query:
+            rows = conn.execute('''
+                SELECT v.*, u.username,
+                       (SELECT COUNT(*) FROM likes l WHERE l.video_id = v.id) AS like_count,
+                       (SELECT COUNT(*) FROM comments c WHERE c.video_id = v.id) AS comment_count
+                FROM videos v JOIN users u ON u.id = v.user_id
+                WHERE v.title LIKE ? OR v.description LIKE ? OR u.username LIKE ?
+                ORDER BY v.id DESC LIMIT ? OFFSET ?
+            ''', (f'%{query}%', f'%{query}%', f'%{query}%', limit, offset)).fetchall()
+        else:
+            rows = algorithm_feed(viewer_id, limit + offset)[offset:offset + limit]
+    else:
+        conn.close()
+        return jsonify({'error': '지원하지 않는 영상 목록입니다.'}), 400
+
+    videos = [api_video_payload(conn, row, viewer_id) for row in rows]
+    conn.close()
+    return jsonify({'videos': videos, 'feed': feed})
+
+
+@app.route('/api/mobile/videos/<int:video_id>', methods=['GET'])
+def api_mobile_video_detail(video_id):
+    user = api_bearer_user()
+    viewer_id = user['id'] if user else None
+    conn = get_db()
+    video = get_video(conn, video_id)
+    if not video:
+        conn.close()
+        return jsonify({'error': '영상을 찾을 수 없습니다.'}), 404
+
+    if viewer_id:
+        key = f'user:{viewer_id}'
+    else:
+        raw = f"mobile:{request.remote_addr or 'unknown'}|{request.headers.get('User-Agent', '')}|{video_id}"
+        key = 'anon:' + hashlib.sha256(raw.encode('utf-8')).hexdigest()
+    inserted = conn.execute(
+        'INSERT OR IGNORE INTO views(video_id, viewer_key, created_at) VALUES (?, ?, ?)',
+        (video_id, key, now_iso())
+    ).rowcount
+    if inserted:
+        conn.execute('UPDATE videos SET views = views + 1 WHERE id = ?', (video_id,))
+        conn.commit()
+        video = get_video(conn, video_id)
+
+    comments = conn.execute('''
+        SELECT c.id, c.body, c.created_at, u.id AS user_id, u.username,
+               (SELECT COUNT(*) FROM comment_likes cl WHERE cl.comment_id = c.id) AS likes
+        FROM comments c JOIN users u ON u.id = c.user_id
+        WHERE c.video_id = ? ORDER BY c.id DESC LIMIT 100
+    ''', (video_id,)).fetchall()
+    result = api_video_payload(conn, video, viewer_id)
+    result['comments_list'] = [{
+        'id': c['id'], 'user_id': c['user_id'], 'username': c['username'],
+        'body': c['body'], 'likes': c['likes'], 'created_at': c['created_at']
+    } for c in comments]
+    conn.close()
+    return jsonify({'video': result})
+
+
+@app.route('/api/mobile/videos/<int:video_id>/like', methods=['POST'])
+def api_mobile_like(video_id):
+    user = api_bearer_user()
+    if not user:
+        return api_auth_error()
+    conn = get_db()
+    if not conn.execute('SELECT 1 FROM videos WHERE id = ?', (video_id,)).fetchone():
+        conn.close()
+        return jsonify({'error': '영상을 찾을 수 없습니다.'}), 404
+    existing = conn.execute(
+        'SELECT 1 FROM likes WHERE user_id = ? AND video_id = ?', (user['id'], video_id)
+    ).fetchone()
+    if existing:
+        conn.execute('DELETE FROM likes WHERE user_id = ? AND video_id = ?', (user['id'], video_id))
+        liked = False
+    else:
+        conn.execute(
+            'INSERT INTO likes(user_id, video_id, created_at) VALUES (?, ?, ?)',
+            (user['id'], video_id, now_iso())
+        )
+        liked = True
+    conn.commit()
+    count = conn.execute('SELECT COUNT(*) FROM likes WHERE video_id = ?', (video_id,)).fetchone()[0]
+    conn.close()
+    return jsonify({'liked': liked, 'likes': count})
+
+
+@app.route('/api/mobile/channels/<int:channel_id>/subscribe', methods=['POST'])
+def api_mobile_subscribe(channel_id):
+    user = api_bearer_user()
+    if not user:
+        return api_auth_error()
+    if user['id'] == channel_id:
+        return jsonify({'error': '자기 자신은 구독할 수 없습니다.'}), 400
+    conn = get_db()
+    if not conn.execute('SELECT 1 FROM users WHERE id = ?', (channel_id,)).fetchone():
+        conn.close()
+        return jsonify({'error': '채널을 찾을 수 없습니다.'}), 404
+    exists = conn.execute(
+        'SELECT 1 FROM subscriptions WHERE subscriber_id = ? AND channel_id = ?',
+        (user['id'], channel_id)
+    ).fetchone()
+    if exists:
+        conn.execute(
+            'DELETE FROM subscriptions WHERE subscriber_id = ? AND channel_id = ?',
+            (user['id'], channel_id)
+        )
+        subscribed = False
+    else:
+        conn.execute(
+            'INSERT INTO subscriptions(subscriber_id, channel_id, created_at) VALUES (?, ?, ?)',
+            (user['id'], channel_id, now_iso())
+        )
+        subscribed = True
+    conn.commit()
+    count = conn.execute(
+        'SELECT COUNT(*) FROM subscriptions WHERE channel_id = ?', (channel_id,)
+    ).fetchone()[0]
+    conn.close()
+    return jsonify({'subscribed': subscribed, 'subscriber_count': count})
+
+
+@app.route('/api/mobile/videos/<int:video_id>/comments', methods=['POST'])
+def api_mobile_comment(video_id):
+    user = api_bearer_user()
+    if not user:
+        return api_auth_error()
+    data = request.get_json(silent=True) or {}
+    body = str(data.get('body', '')).strip()
+    if not body:
+        return jsonify({'error': '댓글 내용을 입력해주세요.'}), 400
+    conn = get_db()
+    if not conn.execute('SELECT 1 FROM videos WHERE id = ?', (video_id,)).fetchone():
+        conn.close()
+        return jsonify({'error': '영상을 찾을 수 없습니다.'}), 404
+    cursor = conn.execute(
+        'INSERT INTO comments(user_id, video_id, body, created_at) VALUES (?, ?, ?, ?)',
+        (user['id'], video_id, body[:1000], now_iso())
+    )
+    conn.commit()
+    comment = conn.execute('''
+        SELECT c.id, c.body, c.created_at, u.id AS user_id, u.username
+        FROM comments c JOIN users u ON u.id = c.user_id WHERE c.id = ?
+    ''', (cursor.lastrowid,)).fetchone()
+    conn.close()
+    return jsonify({'comment': {
+        'id': comment['id'], 'user_id': comment['user_id'],
+        'username': comment['username'], 'body': comment['body'],
+        'likes': 0, 'created_at': comment['created_at']
+    }}), 201
+
+
+@app.route('/api/mobile/videos', methods=['POST'])
+def api_mobile_upload():
+    user = api_bearer_user()
+    if not user:
+        return api_auth_error()
+    title = request.form.get('title', '').strip()
+    description = request.form.get('description', '').strip()
+    video = request.files.get('video')
+    if not title:
+        return jsonify({'error': '영상 제목을 입력해주세요.'}), 400
+    if not video or not video.filename:
+        return jsonify({'error': '영상 파일을 선택해주세요.'}), 400
+    if not allowed_file(video.filename):
+        return jsonify({'error': '지원 파일: MP4, WEBM, OGG, MOV'}), 400
+
+    original = secure_filename(video.filename)
+    if not original or '.' not in original:
+        return jsonify({'error': '올바른 영상 파일이 아닙니다.'}), 400
+    extension = original.rsplit('.', 1)[1].lower()
+    filename = f'{uuid.uuid4().hex}.{extension}'
+    path = video_path(filename)
+    video.save(path)
+
+    thumbnail_name = f'{uuid.uuid4().hex}.jpg'
+    thumb_path = thumbnail_path(thumbnail_name)
+    has_thumbnail = create_thumbnail(path, thumb_path)
+    if not has_thumbnail:
+        thumbnail_name = ''
+
+    conn = get_db()
+    try:
+        cursor = conn.execute('''
+            INSERT INTO videos(user_id, title, description, filename, thumbnail_filename, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (user['id'], title[:200], description[:5000], filename, thumbnail_name, now_iso(), now_iso()))
+        conn.commit()
+        video_id = cursor.lastrowid
+        saved = get_video(conn, video_id)
+        payload = api_video_payload(conn, saved, user['id'])
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        conn.close()
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        if thumbnail_name:
+            try:
+                os.remove(thumb_path)
+            except FileNotFoundError:
+                pass
+        return jsonify({'error': '영상 정보를 저장하지 못했습니다.'}), 500
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return jsonify({'video': payload}), 201
+
+
+
 @app.route('/healthz')
 def healthz():
     return {'status': 'ok'}
@@ -840,6 +1296,11 @@ def healthz():
 @app.route('/media/videos/<path:filename>')
 def video_media(filename):
     return send_from_directory(UPLOAD_DIR, filename, conditional=True)
+
+
+@app.route('/media/thumbnails/<path:filename>')
+def thumbnail_media(filename):
+    return send_from_directory(THUMB_DIR, filename, conditional=True)
 
 
 @app.errorhandler(400)
