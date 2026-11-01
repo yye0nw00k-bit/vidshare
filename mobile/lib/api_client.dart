@@ -20,7 +20,7 @@ class VidShareApi {
   static const _tokenKey = 'vidshare_api_token';
   static const _configuredUrl = String.fromEnvironment(
     'VIDSHARE_API_URL',
-    defaultValue: '',
+    defaultValue: 'https://vidshare-1-1-1.onrender.com',
   );
 
   String _baseUrl = '';
@@ -79,7 +79,7 @@ class VidShareApi {
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {
       final message = payload['error']?.toString() ??
-          '서버 요청에 실패했습니다. (\${response.statusCode})';
+          '서버 요청에 실패했습니다. (' + response.statusCode.toString() + ')';
       throw ApiException(message, statusCode: response.statusCode);
     }
     return payload;
