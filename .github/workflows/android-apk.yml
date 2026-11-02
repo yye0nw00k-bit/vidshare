@@ -31,6 +31,31 @@ jobs:
         working-directory: mobile
         run: flutter create --platforms=android --project-name=vidshare_mobile --org=com.vidshare --no-pub .
 
+      - name: Install Android API 36 and set compile SDK
+        working-directory: mobile
+        shell: bash
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36"
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          gradle_file = Path("android/app/build.gradle.kts")
+          gradle = gradle_file.read_text(encoding="utf-8")
+          updated, count = re.subn(
+              r"compileSdk\\s*=\\s*flutter\\.compileSdkVersion",
+              "compileSdk = 36",
+              gradle,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit(
+                  "Could not find the generated compileSdk = flutter.compileSdkVersion setting."
+              )
+          gradle_file.write_text(updated, encoding="utf-8")
+          print("Android compile SDK set to 36.")
+          PY
+
       - name: Install Flutter packages
         working-directory: mobile
         run: flutter pub get
