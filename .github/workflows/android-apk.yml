@@ -25,13 +25,12 @@ jobs:
         with:
           channel: stable
           cache: true
-          cache-dependency-path: mobile/pubspec.yaml
 
       - name: Generate Android project files
         working-directory: mobile
         run: flutter create --platforms=android --project-name=vidshare_mobile --org=com.vidshare --no-pub .
 
-      - name: Install Android API 36 and set compile SDK
+      - name: Install Android API 36 and set all Android modules to compile SDK 36
         working-directory: mobile
         shell: bash
         run: |
@@ -39,16 +38,39 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
-          gradle_file = Path("android/app/build.gradle.kts")
-          gradle = gradle_file.read_text(encoding="utf-8")
+          app_gradle_file = Path("android/app/build.gradle.kts")
+          app_gradle = app_gradle_file.read_text(encoding="utf-8")
           old = "compileSdk = flutter.compileSdkVersion"
-          if old not in gradle:
-              raise SystemExit("Could not find the generated compileSdk setting.")
-          gradle_file.write_text(
-              gradle.replace(old, "compileSdk = 36", 1),
+          if old not in app_gradle:
+              raise SystemExit("Could not find the generated app compileSdk setting.")
+          app_gradle_file.write_text(
+              app_gradle.replace(old, "compileSdk = 36", 1),
               encoding="utf-8",
           )
-          print("Android compile SDK set to 36.")
+
+          root_gradle_file = Path("android/build.gradle.kts")
+          root_gradle = root_gradle_file.read_text(encoding="utf-8")
+          override = """
+          // Keep Flutter Android plugin subprojects on the same compile SDK.
+          subprojects {
+              afterEvaluate {
+                  val androidExt = project.extensions.findByName("android")
+                      as? com.android.build.gradle.BaseExtension
+                  if (androidExt != null) {
+                      val current = androidExt.compileSdkVersion
+                          ?.removePrefix("android-")
+                          ?.toIntOrNull()
+                      if (current == null || current < 36) {
+                          androidExt.compileSdkVersion(36)
+                      }
+                  }
+              }
+          }
+          """
+          if "Keep Flutter Android plugin subprojects on the same compile SDK." not in root_gradle:
+              root_gradle_file.write_text(root_gradle.rstrip() + "\n\n" + override, encoding="utf-8")
+
+          print("Android app and plugin modules will compile against API 36.")
           PY
 
       - name: Install Flutter packages
