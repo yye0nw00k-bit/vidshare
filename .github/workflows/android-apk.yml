@@ -38,21 +38,16 @@ jobs:
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36"
           python3 - <<'PY'
           from pathlib import Path
-          import re
 
           gradle_file = Path("android/app/build.gradle.kts")
           gradle = gradle_file.read_text(encoding="utf-8")
-          updated, count = re.subn(
-              r"compileSdk\\s*=\\s*flutter\\.compileSdkVersion",
-              "compileSdk = 36",
-              gradle,
-              count=1,
+          old = "compileSdk = flutter.compileSdkVersion"
+          if old not in gradle:
+              raise SystemExit("Could not find the generated compileSdk setting.")
+          gradle_file.write_text(
+              gradle.replace(old, "compileSdk = 36", 1),
+              encoding="utf-8",
           )
-          if count != 1:
-              raise SystemExit(
-                  "Could not find the generated compileSdk = flutter.compileSdkVersion setting."
-              )
-          gradle_file.write_text(updated, encoding="utf-8")
           print("Android compile SDK set to 36.")
           PY
 
